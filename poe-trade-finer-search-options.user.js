@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Poe trade finer-search-options
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
+// @version      2.1.0
 // @description  enables finer search options in Path of exile official trade site, allowing filtering in/out mods directly from the current search result list
 // @author       Maxime B (original), arturino009 (2.x rewrite)
 // @homepageURL  https://github.com/arturino009/poe-trade-finer-search-options
@@ -28,6 +28,7 @@
 
     const LOG = '[finer-search]';
     const STEP = 10;
+    const BTN_W = 18; // px reserved for each per-mod button
 
     const PSEUDO = {
         life: 'pseudo.pseudo_total_life',
@@ -53,15 +54,20 @@
     //---------STYLE---------//
     const css = `
         .finer-mod { position: relative; }
-        .finer-mod.finer-filterable:hover { background: rgba(255, 255, 255, 0.12); }
+        .finer-mod:hover { background: rgba(255, 255, 255, 0.08); }
         .finer-mod.finer-filtered-and { box-shadow: inset 0 0 0 999px rgba(0, 136, 0, .25); }
         .finer-mod.finer-filtered-not { box-shadow: inset 0 0 0 999px rgba(136, 0, 0, .25); }
-        .finer-btns { position: absolute; left: 2px; top: 50%; transform: translateY(-50%); display: none; z-index: 5; }
-        .finer-mod:hover > .finer-btns { display: inline-flex; }
-        .finer-btn { padding: 0 7px; margin-right: 2px; color: #fff; outline: solid 1px grey; cursor: pointer; font-weight: bold; line-height: 1.3; user-select: none; }
-        .finer-btn.add { background: rgba(2, 93, 34, 0.9); }
-        .finer-btn.rmv { background: rgba(93, 2, 2, 0.9); }
-        .finer-btn:hover { filter: brightness(140%); }
+        /* make room for the buttons: tier label (left) and affix name (right) are absolutely positioned by the site */
+        .finer-mod > .lc.l { transform: translateX(${BTN_W}px); }
+        .finer-mod > .lc.r { transform: translateX(-${BTN_W}px); }
+        .finer-btn { position: absolute; top: 50%; transform: translateY(-50%); z-index: 5;
+            width: ${BTN_W - 3}px; height: ${BTN_W - 3}px; box-sizing: border-box; padding: 0;
+            display: flex; align-items: center; justify-content: center;
+            color: #fff; border: 1px solid rgba(255, 255, 255, 0.35); border-radius: 2px;
+            font: bold 13px/1 Arial, sans-serif; cursor: pointer; user-select: none; opacity: .75; }
+        .finer-btn.add { left: 1px; background: rgba(2, 93, 34, 0.9); }
+        .finer-btn.rmv { right: 1px; background: rgba(93, 2, 2, 0.9); }
+        .finer-btn:hover { opacity: 1; filter: brightness(140%); }
 
         #finer-search-global { color: #fff; width: 13em; background: rgba(0, 0, 0, 0.8); position: fixed; right: 10px; top: 50px; z-index: 1001; font-size: 13px; user-select: none; font-family: inherit; }
         #finer-search-global .hidden { display: none !important; }
@@ -136,27 +142,47 @@
         return field ? field.getAttribute('data-field').slice(5) : null;
     };
 
+    const makeBtn = (cls, text) => {
+        const b = document.createElement('span');
+        b.className = 'finer-btn ' + cls;
+        b.textContent = text;
+        return b;
+    };
+
+    // Buttons per filter state:
+    //   not filtered    -> [+] add to AND      [-] add to NOT
+    //   in AND (or any) -> [-] remove it from that group
+    //   in NOT          -> [+] remove it from the NOT group
     const markMod = modEl => {
         const id = statIdOf(modEl);
         if (!id) return;
-        modEl.classList.add('finer-mod');
-        const type = filterTypeOf(id);
-        modEl.classList.toggle('finer-filtered-and', type === 'and');
-        modEl.classList.toggle('finer-filtered-not', type === 'not');
-        modEl.classList.toggle('finer-filterable', !type);
+        const type = filterTypeOf(id) || '';
+        if (modEl.dataset.finerState === type && modEl.classList.contains('finer-mod') &&
+            modEl.querySelector(':scope > .finer-btn')) return; // up to date
+        modEl.dataset.finerState = type;
 
-        let btns = modEl.querySelector(':scope > .finer-btns');
-        if (type) {
-            if (btns) btns.remove();
-            return;
-        }
-        if (!btns) {
-            btns = document.createElement('span');
-            btns.className = 'finer-btns';
-            btns.innerHTML =
-                '<span class="finer-btn add" title="add this mod to your search filters">+</span>' +
-                '<span class="finer-btn rmv" title="exclude this mod from your search results">-</span>';
-            modEl.appendChild(btns);
+        modEl.classList.add('finer-mod');
+        modEl.classList.toggle('finer-filtered-and', !!type && type !== 'not');
+        modEl.classList.toggle('finer-filtered-not', type === 'not');
+
+        modEl.querySelectorAll(':scope > .finer-btn').forEach(b => b.remove());
+        const add = makeBtn('add', '+');
+        const rmv = makeBtn('rmv', '−');
+        if (!type) {
+            add.dataset.action = 'and';
+            add.title = 'add this mod to your search filters';
+            rmv.dataset.action = 'not';
+            rmv.title = 'exclude this mod from your search results';
+            modEl.prepend(add);
+            modEl.appendChild(rmv);
+        } else if (type === 'not') {
+            add.dataset.action = 'remove';
+            add.title = 'remove this mod from the excluded (NOT) filters';
+            modEl.prepend(add);
+        } else {
+            rmv.dataset.action = 'remove';
+            rmv.title = `remove this mod from your ${type.toUpperCase()} filters`;
+            modEl.appendChild(rmv);
         }
     };
 
@@ -176,6 +202,15 @@
         store().commit('setStatFilter', { group, value: { id, value: {}, disabled: false } });
         store().commit('showAdvancedSearch', true);
         toast(`the stat ${id} has been ${type === 'and' ? 'added to' : 'excluded from'} your stat filters.`);
+        commitAndSearch();
+    };
+
+    const removeModFilter = modEl => {
+        const id = statIdOf(modEl);
+        const hit = id && findFilter(id);
+        if (!hit) return;
+        store().commit('removeStatFilter', { group: hit.group, index: hit.index });
+        toast(`the stat ${id} has been removed from your stat filters.`);
         commitAndSearch();
     };
 
@@ -304,7 +339,10 @@
         if (modBtn) {
             e.preventDefault();
             e.stopPropagation();
-            addModFilter(modBtn.closest('.item-mod'), modBtn.classList.contains('add') ? 'and' : 'not');
+            const modEl = modBtn.closest('.item-mod');
+            const action = modBtn.dataset.action;
+            if (action === 'remove') removeModFilter(modEl);
+            else if (action) addModFilter(modEl, action);
             return;
         }
 
